@@ -49,17 +49,54 @@ _ICON_B64 = (
 def onMayaDroppedPythonFile(*args, **kwargs):
     """Called automatically by Maya when this file is dragged into the viewport."""
 
-    # --- 1. Resolve source directory ---
-    try:
-        install_file = args[0]
-    except (IndexError, TypeError):
-        try:
-            install_file = __file__
-        except NameError:
-            cmds.warning('Anim Shortcuts: Could not determine install path.')
-            return
+    # --- 1. Resolve source directory (AYON-proof) ---
+    # AYON intercepts Maya's drag-and-drop, so args[0] may point to an AYON
+    # path rather than the real LayoutForger folder.  We therefore validate
+    # that layout_forger.py actually lives in the resolved directory before
+    # trusting it, and fall back through several candidates if not.
 
-    install_dir = os.path.dirname(os.path.abspath(install_file))
+    _SCRIPT_NAME = 'layout_forger.py'
+
+    def _find_install_dir():
+        candidates = []
+
+        # Candidate 1: path passed by Maya's drag-and-drop
+        try:
+            candidates.append(os.path.dirname(os.path.abspath(args[0])))
+        except (IndexError, TypeError):
+            pass
+
+        # Candidate 2: __file__ of this installer (most reliable when available)
+        try:
+            candidates.append(os.path.dirname(os.path.abspath(__file__)))
+        except NameError:
+            pass
+
+        # Candidate 3: scan existing sys.path entries (covers AYON-managed envs)
+        for p in sys.path:
+            if p and os.path.isfile(os.path.join(p, _SCRIPT_NAME)):
+                candidates.append(p)
+
+        for candidate in candidates:
+            if os.path.isfile(os.path.join(candidate, _SCRIPT_NAME)):
+                return candidate
+
+        return None
+
+    install_dir = _find_install_dir()
+
+    if install_dir is None:
+        cmds.confirmDialog(
+            title='LayoutForger — Install Error',
+            message=(
+                'Could not locate layout_forger.py.\n\n'
+                'Make sure LayoutForger_install.py and layout_forger.py '
+                'are in the same folder, then drag the installer again.'
+            ),
+            button=['OK'],
+            defaultButton='OK',
+        )
+        return
 
     # --- 2. Write icon to Documents/maya/prefs/icons (hardcoded, AYON-proof) ---
     # We always use the real Windows Documents folder, never a pipeline override.

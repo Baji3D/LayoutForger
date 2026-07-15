@@ -2,6 +2,9 @@
 LayoutForger — Custom hotkey manager for Maya animators.
 By Baji N | baji.digital
 """
+
+VERSION = '0.0.1'
+
 import os
 import maya.cmds as cmds
 import maya.mel as mel
@@ -30,8 +33,8 @@ HOTKEYS = {
                         _RELOAD_PREFIX + 'layout_forger.floating_shot_cam()'),
     'Cam + Graph':     ('s', 'LayoutForger_StackedView',
                         _RELOAD_PREFIX + 'layout_forger.stacked_cam_graph()'),
-    'Toggle Outliner': ('h', 'LayoutForger_ToggleOutliner',
-                        _RELOAD_PREFIX + 'layout_forger.toggle_outliner()'),
+    'Toggle Panels':  ('h', 'LayoutForger_TogglePanels',
+                        _RELOAD_PREFIX + 'layout_forger.toggle_panels()'),
 }
 
 # ---------------------------------------------------------------------------
@@ -158,15 +161,40 @@ def maximize_dope_sheet():
 
 
 def maximize_camera():
-    """Full-screen camera viewport, restoring Space-bar quad-toggle."""
-    mel.eval('setNamedPanelLayout "Four View"')
+    """Full-screen shot-camera viewport.
+
+    Captures whatever camera is currently visible (respects stacked / quad
+    views) before switching the layout so the panel reset does not drop you
+    back to persp.
+    """
+    # 1. Remember the active camera before any layout change
+    current_cam = None
+    focused = cmds.getPanel(withFocus=True)
+    if focused and cmds.getPanel(typeOf=focused) == 'modelPanel':
+        current_cam = cmds.modelPanel(focused, query=True, camera=True)
+    if not current_cam:
+        for p in (cmds.getPanel(visiblePanels=True) or []):
+            if cmds.getPanel(typeOf=p) == 'modelPanel':
+                current_cam = cmds.modelPanel(p, query=True, camera=True)
+                break
+
+    # 2. Switch to single-panel layout (no Four View detour — that resets cams)
     mel.eval('setNamedPanelLayout "Single Perspective View"')
-    panel = cmds.getPanel(withFocus=True)
-    if panel and cmds.getPanel(typeOf=panel) != 'modelPanel':
-        try:
-            cmds.modelPanel('modelPanel4', edit=True, replacePanel=panel)
-        except Exception as e:
-            cmds.warning('Could not switch to camera: ' + str(e))
+
+    # 3. Restore the camera we were looking through
+    if current_cam:
+        panel = cmds.getPanel(withFocus=True)
+        if not panel or cmds.getPanel(typeOf=panel) != 'modelPanel':
+            # focus may have shifted after layout swap — grab first visible
+            for p in (cmds.getPanel(visiblePanels=True) or []):
+                if cmds.getPanel(typeOf=p) == 'modelPanel':
+                    panel = p
+                    break
+        if panel:
+            try:
+                cmds.modelPanel(panel, edit=True, camera=current_cam)
+            except Exception as e:
+                cmds.warning('LayoutForger: Could not restore camera — ' + str(e))
 
 
 def stacked_cam_graph():
@@ -195,27 +223,44 @@ def stacked_cam_graph():
                 break
 
 
-def toggle_outliner():
-    """Toggle Outliner + Channel Box together."""
-    outliner_vis = False
-    channelbox_vis = False
-    try:
-        outliner_vis = cmds.workspaceControl('outlinerPanel1WorkspaceControl', query=True, visible=True)
-    except Exception:
-        pass
-    try:
-        channelbox_vis = cmds.workspaceControl('ChannelBoxLayerEditor', query=True, visible=True)
-    except Exception:
-        pass
+# All right-side workspace panels hidden by Ctrl+Shift+H.
+_SIDE_PANELS = [
+    'outlinerPanel1WorkspaceControl',   # Outliner
+    'ChannelBoxLayerEditor',            # Channel Box / Layer Editor
+    'AttributeEditor',                  # Attribute Editor
+    'ToolSettings',                     # Tool Settings
+    'NEXDockControl',                   # Modelling Toolkit (Maya 2022+)
+    'CharacterControls',                # Character Controls
+]
 
-    if outliner_vis or channelbox_vis:
-        if outliner_vis:
-            mel.eval('ToggleOutliner')
-        if channelbox_vis:
-            mel.eval('ToggleChannelBox')
+
+def toggle_panels():
+    """Ctrl+Shift+H: hide all right-side panels, or restore only the Outliner.
+
+    Any panel visible  -> hide ALL panels.
+    All panels hidden  -> show Outliner only.
+    """
+    any_visible = False
+    for ctrl in _SIDE_PANELS:
+        try:
+            if cmds.workspaceControl(ctrl, query=True, exists=True):
+                if cmds.workspaceControl(ctrl, query=True, visible=True):
+                    any_visible = True
+                    break
+        except Exception:
+            pass
+
+    if any_visible:
+        # Hide everything
+        for ctrl in _SIDE_PANELS:
+            try:
+                if cmds.workspaceControl(ctrl, query=True, exists=True):
+                    cmds.workspaceControl(ctrl, edit=True, visible=False)
+            except Exception:
+                pass
     else:
+        # Restore Outliner only
         mel.eval('ToggleOutliner')
-        mel.eval('ToggleChannelBox')
 
 
 def floating_shot_cam():
@@ -429,10 +474,14 @@ class ShortcutManagerUI(object):
                 buttons = cmds.shelfLayout(shelf, query=True, childArray=True) or []
                 for btn in buttons:
                     try:
-                        if cmds.objectTypeUI(btn) == 'shelfButton':
-                            cmd = cmds.shelfButton(btn, query=True, command=True) or ''
-                            if 'anim_shortcuts' in cmd:
-                                cmds.deleteUI(btn)
+                        if cmds.objectTypeUI(btn) != 'shelfButton':
+                            continue
+                        cmd  = cmds.shelfButton(btn, query=True, command=True)     or ''
+                        ann  = cmds.shelfButton(btn, query=True, annotation=True)  or ''
+                        if ('layout_forger' in cmd or
+                                'anim_shortcuts' in cmd or
+                                'LayoutForger' in ann):
+                            cmds.deleteUI(btn)
                     except Exception:
                         pass
         except Exception:
@@ -522,7 +571,7 @@ def show_about():
 
     _row('Tool',    'LayoutForger')
     pos += 18
-    _row('Version', '1.0')
+    _row('Version', VERSION)
     pos += 18
     _row('Author',  'Baji N')
     pos += 18
