@@ -198,29 +198,80 @@ def maximize_camera():
 
 
 def stacked_cam_graph():
-    """Persp/Graph stacked layout, retaining the current active camera."""
-    # Capture current camera before switching
+    """Top: camera viewport (same cam as before).  Bottom: Graph Editor.
+
+    Builds the two-panel layout manually so we always get camera-on-top /
+    Graph Editor-on-bottom, regardless of what Maya's built-in named layouts
+    decide to do.
+    """
+    # 1. Remember the active camera BEFORE any layout change
     current_cam = None
-    panel = cmds.getPanel(withFocus=True)
-    if panel and cmds.getPanel(typeOf=panel) == 'modelPanel':
-        current_cam = cmds.modelPanel(panel, query=True, camera=True)
-    else:
+    focused = cmds.getPanel(withFocus=True)
+    if focused and cmds.getPanel(typeOf=focused) == 'modelPanel':
+        current_cam = cmds.modelPanel(focused, query=True, camera=True)
+    if not current_cam:
         for p in (cmds.getPanel(visiblePanels=True) or []):
             if cmds.getPanel(typeOf=p) == 'modelPanel':
                 current_cam = cmds.modelPanel(p, query=True, camera=True)
                 break
+    if not current_cam:
+        current_cam = 'persp'
 
-    mel.eval('setNamedPanelLayout "Persp/Graph"')
+    # 2. Switch to a clean single-panel layout first (avoids leftover panels
+    #    interfering with the paneLayout we're about to build)
+    mel.eval('setNamedPanelLayout "Single Perspective View"')
 
-    # Restore camera to the top viewport
-    if current_cam:
-        for p in (cmds.getPanel(visiblePanels=True) or []):
-            if cmds.getPanel(typeOf=p) == 'modelPanel':
-                try:
-                    cmds.modelPanel(p, edit=True, camera=current_cam)
-                except Exception:
-                    pass
-                break
+    # 3. Find the main Maya layout container and build our 2-row pane inside it
+    main_layout = mel.eval('$_tmp = $gMainPane')
+
+    # Re-parent the existing model panel into the top pane
+    try:
+        cmds.paneLayout(main_layout, edit=True,
+                        configuration='horizontal2',
+                        paneSize=[(1, 100, 60), (2, 100, 40)])
+    except Exception:
+        # Fallback: just use the named layout if we can't edit gMainPane
+        mel.eval('setNamedPanelLayout "Persp/Graph"')
+        if current_cam:
+            for p in (cmds.getPanel(visiblePanels=True) or []):
+                if cmds.getPanel(typeOf=p) == 'modelPanel':
+                    try:
+                        cmds.modelPanel(p, edit=True, camera=current_cam)
+                    except Exception:
+                        pass
+                    break
+        return
+
+    # 4. Assign panels to panes: model panel → pane 1 (top),
+    #    Graph Editor scripted panel → pane 2 (bottom)
+    visible = cmds.getPanel(visiblePanels=True) or []
+    model_panel = next((p for p in visible
+                        if cmds.getPanel(typeOf=p) == 'modelPanel'), None)
+    if model_panel is None:
+        # create a fresh one if needed
+        model_panel = cmds.modelPanel()
+
+    try:
+        cmds.scriptedPanel('graphEditor1', edit=True,
+                           replacePanel=cmds.paneLayout(
+                               main_layout, query=True, pane2=True))
+    except Exception:
+        pass
+
+    try:
+        cmds.modelPanel(model_panel, edit=True,
+                        replacePanel=cmds.paneLayout(
+                            main_layout, query=True, pane1=True))
+    except Exception:
+        pass
+
+    # 5. Restore the camera the user was looking through
+    try:
+        cmds.modelPanel(model_panel, edit=True, camera=current_cam)
+    except Exception as e:
+        cmds.warning('LayoutForger: Could not restore camera — ' + str(e))
+
+    cmds.setFocus(model_panel)
 
 
 # All right-side workspace panels hidden by Ctrl+Shift+H.
@@ -346,7 +397,8 @@ class ShortcutManagerUI(object):
             cmds.deleteUI(self.win_name)
 
         self.win = cmds.window(self.win_name, title='LayoutForger',
-                               widthHeight=(280, 380))
+                               widthHeight=(300, 520), sizeable=True)
+
         cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
                           columnAttach=('both', 10))
 
@@ -401,7 +453,9 @@ class ShortcutManagerUI(object):
 
         cmds.separator(height=6, style='none')
         cmds.button(label='Uninstall Plugin', command=self._uninstall,
-                    backgroundColor=(0.25, 0.25, 0.25), height=20)
+                    backgroundColor=(0.25, 0.25, 0.25), height=24)
+
+        cmds.separator(height=8, style='none')
 
         cmds.showWindow(self.win)
 
@@ -487,23 +541,37 @@ class ShortcutManagerUI(object):
         except Exception:
             pass
 
-        # 3. Clean userSetup.py
+        # 3. Clean userSetup.py — search both possible locations
         user_app_dir = cmds.internalVar(userAppDir=True)
-        scripts_dir  = os.path.join(user_app_dir, 'scripts')
-        setup_file   = os.path.join(scripts_dir, 'userSetup.py')
-        if os.path.exists(setup_file):
+        docs_maya = os.path.join(
+            os.environ.get('USERPROFILE', os.path.expanduser('~')),
+            'Documents', 'maya')
+        candidate_scripts = [
+            os.path.join(docs_maya, 'scripts'),          # where installer writes
+            os.path.join(user_app_dir, 'scripts'),        # legacy location
+        ]
+        _MARKERS = (
+            '# --- LayoutForger Auto-Start ---',
+            '# --- Anim Shortcuts Auto-Start ---',        # legacy marker
+        )
+        for scripts_dir in candidate_scripts:
+            setup_file = os.path.join(scripts_dir, 'userSetup.py')
+            if not os.path.exists(setup_file):
+                continue
             try:
                 with open(setup_file, 'r') as f:
                     lines = f.readlines()
                 skip = False
+                cleaned = []
+                for line in lines:
+                    if any(m in line for m in _MARKERS):
+                        skip = True
+                    if not skip:
+                        cleaned.append(line)
+                    if '# ---------------------------------' in line:
+                        skip = False
                 with open(setup_file, 'w') as f:
-                    for line in lines:
-                        if '# --- Anim Shortcuts Auto-Start ---' in line:
-                            skip = True
-                        if not skip:
-                            f.write(line)
-                        if '# ---------------------------------' in line:
-                            skip = False
+                    f.writelines(cleaned)
             except Exception:
                 pass
 
